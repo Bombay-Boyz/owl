@@ -10,10 +10,8 @@
 --
 -- STILL NOT DONE, stated plainly:
 --   * (Date is now set -- see toEnvelope's UTCTime parameter.)
---   * Attachments are not embedded in the rendered payload (the
---     multipart-construction API remains unverified). Note the
---     SMTP path DOES send them, via mime-mail -- so the stored copy
---     and the transmitted copy genuinely differ here.
+--   * (Attachments are now embedded -- see renderDraft's multipart
+--     path. Both copies carry them.)
 --
 -- The Message-ID is computed ONCE, by outgoingMessageIdText, and
 -- carried on OutgoingEnvelope as envelopeMessageId so that the stored
@@ -58,7 +56,7 @@ import Data.Time.Format (defaultTimeLocale, formatTime)
 import qualified Data.UUID as UUID
 
 import Owl.Domain.Address (EmailAddress, unEmailAddress)
-import Owl.Domain.Attachment (Attachment)
+import Owl.Domain.Attachment (Attachment (..))
 import Owl.Domain.Body (Body (..))
 import Owl.Domain.Id (AccountId, LocalId (..), MessageId (..))
 import Owl.Domain.Identity (Identity (..))
@@ -261,7 +259,24 @@ toEnvelope now draft = case NE.nonEmpty (draftRecipients draft) of
 renderDraft :: UTCTime -> Draft -> ByteString
 renderDraft now draft = LBS.toStrict (MIME.renderMessage populated)
   where
-    base = MIME.createTextPlainMessage (fromMaybe Text.empty (bodyPlainText (draftBody draft)))
+    textPart = MIME.createTextPlainMessage (fromMaybe Text.empty (bodyPlainText (draftBody draft)))
+
+    -- Single-part when there is nothing to attach, multipart/mixed
+    -- otherwise. The header sets below are applied to whichever of
+    -- these ends up as the OUTER message, which is what
+    -- createMultipartMixedMessage expects (it starts from Headers []
+    -- with only Content-Type set).
+    base = case (draftAttachments draft, outgoingBoundary draft) of
+      ([], _)            -> textPart
+      (atts, Just bound) -> MIME.createMultipartMixedMessage bound
+                              (textPart :| map attachmentPart atts)
+      (_, Nothing)       -> textPart
+        -- Unreachable in practice: the boundary is derived from a UUID,
+        -- which is always valid bchar text well under the 70-byte
+        -- limit. Falling back to the text part rather than crashing
+        -- (§30) -- though note this would silently drop attachments,
+        -- so if it ever fires the boundary derivation is wrong.
+
     fromMailbox = addressToMailbox (Address (identityDisplayName (draftIdentity draft)) (identityEmailAddress (draftIdentity draft)))
     toMailboxes = map addressToMailbox (draftRecipients draft)
     populated =
@@ -360,3 +375,45 @@ emailToAddrSpec email =
 rfc5322Date :: UTCTime -> Text
 rfc5322Date =
   Text.pack . formatTime defaultTimeLocale "%a, %d %b %Y %H:%M:%S %z" . utcToZonedTime utc
+
+
+-- | The multipart boundary, derived deterministically from the draft's
+-- own UUID rather than generated randomly.
+--
+-- purebred's own documentation reaches for @getStdRandom uniform@,
+-- which is an effect. Deriving from draftId instead keeps renderDraft
+-- pure and still satisfies what a boundary actually has to be: unique
+-- per message, and absent from the content. A UUID gives both -- it is
+-- already unique, and the chance of a random UUID appearing verbatim
+-- in a message body is not worth a code path.
+--
+-- The "owl-" prefix makes the boundary recognisable when reading raw
+-- source, which costs nothing and helps when debugging real mail.
+outgoingBoundary :: Draft -> Maybe MIME.Boundary
+outgoingBoundary draft =
+  either (const Nothing) Just (MIME.makeBoundary (TE.encodeUtf8 candidate))
+  where
+    MessageId (LocalId uuid) = draftId draft
+    candidate = "owl-" <> UUID.toText uuid
+
+-- | One attachment as a MIME part. purebred's createAttachment sets
+-- Content-Type and Content-Disposition: attachment (with the filename
+-- parameter) and transfer-encodes the content itself, so there is
+-- nothing further to do here.
+--
+-- An unparseable stored MIME type falls back to
+-- application/octet-stream rather than dropping the attachment: a file
+-- the recipient must save manually is a far better outcome than a file
+-- that silently never arrives.
+attachmentPart :: Attachment -> MIME.MIMEMessage
+attachmentPart att =
+  MIME.createAttachment
+    contentTypeOf
+    (Text.unpack <$> attachmentFilename att)
+    (attachmentContent att)
+  where
+    contentTypeOf =
+      either
+        (const MIME.contentTypeApplicationOctetStream)
+        id
+        (parseOnly MIME.parseContentType (TE.encodeUtf8 (attachmentMimeType att)))

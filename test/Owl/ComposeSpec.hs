@@ -20,7 +20,7 @@ import Owl.Domain.Id (AccountId (..), LocalId (..), MessageId (..), ThreadId (..
 import Owl.Domain.Identity (Identity (..))
 import Owl.Domain.MailAddress (Address (..), addressEmail)
 import Owl.Domain.Subject (Subject, mkSubject, unSubject)
-import Owl.Domain.Attachment (AttachmentLimits (..))
+import Owl.Domain.Attachment (Attachment (..), AttachmentLimits (..))
 import Owl.Message.Boundary (decodeCharset, parseMessage, toMessage, validateMessage)
 import Owl.Message.Identity (MessageIdentity (..), ValidatedRfcId, parseRfcMessageId)
 import Owl.Message.Types (Message (..))
@@ -246,6 +246,55 @@ spec = do
     -- signal to write this.
     it "emits a Date in UTC, never the local zone (docs/header-privacy.md R3)" $
       shouldContainBytes "UTC offset" "+0000" simpleDraft
+
+    it "embeds attachments as multipart/mixed" $ do
+      let withAtt = simpleDraft
+            { draftAttachments =
+                [ Attachment (Just "notes.txt") "text/plain" "file contents here" ]
+            }
+      shouldContainBytes "multipart content type" "multipart/mixed" withAtt
+      shouldContainBytes "attachment disposition" "attachment" withAtt
+      shouldContainBytes "filename parameter" "notes.txt" withAtt
+
+    it "stays single-part when there is nothing to attach" $
+      case payloadOf simpleDraft of
+        Left err      -> expectationFailure err
+        Right payload -> ("multipart" `BC.isInfixOf` payload) `shouldBe` False
+
+    it "uses a boundary derived from the draft's UUID, not a random one" $
+      -- mkMid 3 is UUID.fromWords 3 0 0 0, so this is deterministic --
+      -- the same draft renders byte-identically every time, which a
+      -- randomly-generated boundary would not.
+      shouldContainBytes "derived boundary"
+        "owl-00000003-0000-0000-0000-000000000000"
+        simpleDraft { draftAttachments = [Attachment (Just "a.txt") "text/plain" "x"] }
+
+    it "attachment round-trip: an attached file survives render and re-parse" $ do
+      let withAtt = simpleDraft
+            { draftAttachments =
+                [ Attachment (Just "notes.txt") "text/plain" "file contents here" ]
+            }
+      case toEnvelope testNow withAtt of
+        Left err  -> expectationFailure (show err)
+        Right env -> case parseMessage (envelopePayload env) of
+          Left _    -> expectationFailure "multipart payload did not parse"
+          Right raw -> case decodeCharset raw of
+            Left _    -> expectationFailure "multipart payload did not decode"
+            Right dec ->
+              case validateMessage (AccountId "acct1") (mkMid 9) testLimits dec of
+                Left err -> expectationFailure ("multipart failed validation: " ++ show err)
+                Right vm -> do
+                  let recovered = attachments (toMessage vm)
+                  map attachmentContent recovered `shouldBe` ["file contents here"]
+                  map attachmentFilename recovered `shouldBe` [Just "notes.txt"]
+
+    it "falls back to octet-stream for an unparseable stored MIME type, \
+       \rather than dropping the attachment" $ do
+      let weird = simpleDraft
+            { draftAttachments =
+                [ Attachment (Just "x.bin") "this is not a mime type" "data" ]
+            }
+      shouldContainBytes "fallback type" "application/octet-stream" weird
 
     it "can parse back a date it wrote itself -- round-trips through our own parser" $
       case toEnvelope testNow simpleDraft of
