@@ -1,5 +1,6 @@
 module Owl.ComposeSpec (spec) where
 
+import qualified Data.ByteString.Char8 as BC
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -159,3 +160,75 @@ spec = do
         Right envelope -> case parseMessage (envelopePayload envelope) of
           Left _  -> expectationFailure "rendered payload did not parse"
           Right _ -> pure ()
+
+  -- These assert on the actual rendered BYTES, not on the envelope's
+  -- structured fields. That distinction is the whole point: the
+  -- envelope carried thread headers correctly for some time while
+  -- renderDraft silently ignored them, and every structural test
+  -- passed throughout. Only dumping the bytes revealed it.
+  describe "outgoing header audit -- asserts on rendered bytes" $ do
+    let simpleDraft = (newDraft (mkMid 3) testIdentity (mkSub "Hi there"))
+          { draftRecipients = [mkAddr "bob@example.net"]
+          , draftBody       = Body (Just "hello") Nothing
+          }
+
+        payloadOf draft = case toEnvelope draft of
+          Left err       -> Left (show err)
+          Right envelope -> Right (envelopePayload envelope)
+
+        shouldContainBytes label needle draft =
+          case payloadOf draft of
+            Left err      -> expectationFailure (label ++ ": " ++ err)
+            Right payload ->
+              if needle `BC.isInfixOf` payload
+                then pure ()
+                else expectationFailure
+                       (label ++ ": expected " ++ show needle
+                        ++ " in rendered payload:\n" ++ BC.unpack payload)
+
+    it "emits a Message-ID" $
+      shouldContainBytes "Message-ID header" "Message-ID:" simpleDraft
+
+    it "emits a Message-ID of the form <uuid@sender-domain>" $
+      -- mkMid 3 is UUID.fromWords 3 0 0 0, so the exact text is known.
+      shouldContainBytes "exact Message-ID"
+        "<00000003-0000-0000-0000-000000000000@example.com>" simpleDraft
+
+    it "does NOT leak a hostname in the Message-ID (docs/header-privacy.md R1)" $
+      case payloadOf simpleDraft of
+        Left err      -> expectationFailure err
+        Right payload -> do
+          -- The right-hand side must be the sender's mail domain and
+          -- nothing else -- no .local, no machine name.
+          (".local" `BC.isInfixOf` payload) `shouldBe` False
+          ("localhost" `BC.isInfixOf` payload) `shouldBe` False
+
+    it "emits no User-Agent or X-Mailer (docs/header-privacy.md R2)" $
+      case payloadOf simpleDraft of
+        Left err      -> expectationFailure err
+        Right payload -> do
+          ("User-Agent" `BC.isInfixOf` payload) `shouldBe` False
+          ("X-Mailer" `BC.isInfixOf` payload) `shouldBe` False
+
+    it "emits In-Reply-To for a reply, pointing at the original" $
+      case Compose.replyTo (mkMid 4) ReplyToSender testIdentity originalMsg of
+        Left err    -> expectationFailure (show err)
+        Right draft -> do
+          shouldContainBytes "In-Reply-To header" "In-Reply-To:" draft
+          shouldContainBytes "original message id" "orig@example.com" draft
+
+    it "emits References for a reply" $
+      case Compose.replyTo (mkMid 4) ReplyToSender testIdentity originalMsg of
+        Left err    -> expectationFailure (show err)
+        Right draft -> shouldContainBytes "References header" "References:" draft
+
+    it "emits no In-Reply-To for a fresh compose" $
+      case payloadOf simpleDraft of
+        Left err      -> expectationFailure err
+        Right payload -> ("In-Reply-To" `BC.isInfixOf` payload) `shouldBe` False
+
+    it "KNOWN GAP: no Date header yet -- this test documents the gap and \
+       \must be inverted when Date is added" $
+      case payloadOf simpleDraft of
+        Left err      -> expectationFailure err
+        Right payload -> ("Date:" `BC.isInfixOf` payload) `shouldBe` False
