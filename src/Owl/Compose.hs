@@ -18,10 +18,15 @@
 --     multipart-construction API remains unverified). Note the
 --     SMTP path DOES send them, via mime-mail -- so the stored copy
 --     and the transmitted copy genuinely differ here.
---   * Owl.Provider.SMTP.buildMail still ignores envelopeThreadHeaders,
---     so the TRANSMITTED copy has no In-Reply-To/References even
---     though the stored copy now does. Fixing that needs mime-mail's
---     Mail header field verified first.
+--
+-- The Message-ID is computed ONCE, by outgoingMessageIdText, and
+-- carried on OutgoingEnvelope as envelopeMessageId so that the stored
+-- copy (rendered here, via purebred) and the transmitted copy
+-- (rendered by Owl.Provider.SMTP, via mime-mail) are guaranteed to
+-- agree. Two independently-derived Message-IDs for the same message
+-- would break thread continuity and any later "find the message I
+-- sent" lookup, and nothing would catch it -- both would look
+-- individually well-formed.
 module Owl.Compose
   ( Draft (..)
   , newDraft
@@ -202,6 +207,11 @@ data OutgoingEnvelope = OutgoingEnvelope
     -- message -- a reply was going out threading-blind. Carried here
     -- so Owl.Provider.SMTP can set In-Reply-To/References on what is
     -- actually transmitted.
+  , envelopeMessageId     :: !Text
+    -- ^ This message's Message-ID, in its full <...> form. Shared
+    -- deliberately: see this module's header note on why both
+    -- renderers must use the same value rather than each deriving
+    -- their own.
   , envelopePayload       :: !ByteString
   }
   deriving stock (Eq, Show)
@@ -223,6 +233,7 @@ toEnvelope draft = case NE.nonEmpty (draftRecipients draft) of
     , envelopeBodyPlain     = bodyPlainText (draftBody draft)
     , envelopeAttachments   = draftAttachments draft
     , envelopeThreadHeaders = draftThreadHeaders draft
+    , envelopeMessageId     = outgoingMessageIdText draft
     , envelopePayload       = renderDraft draft
     }
 
@@ -266,13 +277,19 @@ renderDraft draft = LBS.toStrict (MIME.renderMessage populated)
 -- which for a UUID plus an already-validated domain should be
 -- unreachable -- reported as absent rather than crashed, per §30.
 outgoingMessageID :: Draft -> Maybe IMF.MessageID
-outgoingMessageID draft = parseMessageIdText messageIdText
+outgoingMessageID = parseMessageIdText . outgoingMessageIdText
+
+-- | The single source of truth for this message's Message-ID text.
+-- Both renderers go through here -- outgoingMessageID for the stored
+-- copy, envelopeMessageId for the transmitted one -- so they cannot
+-- disagree.
+outgoingMessageIdText :: Draft -> Text
+outgoingMessageIdText draft = "<" <> UUID.toText uuid <> "@" <> senderDomain <> ">"
   where
     MessageId (LocalId uuid) = draftId draft
     senderDomain =
       Text.drop 1 (Text.dropWhile (/= '@')
         (unEmailAddress (identityEmailAddress (draftIdentity draft))))
-    messageIdText = "<" <> UUID.toText uuid <> "@" <> senderDomain <> ">"
 
 -- | Sets In-Reply-To and References for a reply. Both are proper
 -- Lens' in purebred (confirmed from its source), so `set` creates the

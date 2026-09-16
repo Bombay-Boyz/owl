@@ -23,6 +23,10 @@
 -- source -- the most likely remaining thing to need correcting here.
 module Owl.Provider.SMTP
   ( sendMessage
+  , buildMail
+    -- ^ Exported for testing: the headers it sets are the only part
+    -- of the SMTP path that can be verified without a live server,
+    -- and they were wrong (absent) until now.
   ) where
 
 import Control.Exception (SomeException, try)
@@ -41,6 +45,8 @@ import Owl.Domain.Address (unEmailAddress)
 import Owl.Domain.Attachment (Attachment (..))
 import Owl.Domain.MailAddress (Address (..), sanitizeDisplayName)
 import Owl.Domain.Subject (unSubject)
+import Owl.Message.Identity (unValidatedRfcId)
+import Owl.Compose (Headers (..))
 import Owl.Provider.Types
 
 sendMessage :: ProviderSession -> OutgoingEnvelope -> IO (Either ProviderError SendOutcome)
@@ -55,9 +61,27 @@ sendMessage session envelope = do
         Left _   -> Right SendOutcomeUnknown
         Right () -> Right Sent
 
+-- | Builds the message mime-mail will actually transmit.
+--
+-- Sets Message-ID and, for a reply, In-Reply-To/References. None of
+-- these were present before: mime-mail's renderMail adds no Message-ID
+-- and no Date of its own (confirmed by reading its source -- neither
+-- string appears in it), so the transmitted copy carried nothing to
+-- thread against even after the STORED copy was fixed. A reply would
+-- have looked correct in the Sent folder while still arriving as an
+-- orphan.
+--
+-- Extra headers are APPENDED to mailHeaders, never assigned over it:
+-- simpleMail' already puts the Subject there (mailHeaders is
+-- documented as "other headers, excluding from, to, cc and bcc"), so
+-- replacing the list would silently drop the subject line.
+--
+-- Message-ID comes from envelopeMessageId rather than being derived
+-- here, so it is byte-identical to the stored copy's -- see
+-- Owl.Compose's header note.
 buildMail :: OutgoingEnvelope -> Mime.Mail
 buildMail envelope =
-  (Mime.addAttachmentsBS attachmentTriples baseMail) { Mime.mailTo = toAddrs }
+  withExtraHeaders ((Mime.addAttachmentsBS attachmentTriples baseMail) { Mime.mailTo = toAddrs })
   where
     fromAddr = toMimeAddress (envelopeSender envelope)
     toAddrs  = map toMimeAddress (toList (envelopeRecipients envelope))
@@ -70,6 +94,20 @@ buildMail envelope =
       [ (attachmentMimeType a, fromMaybe "attachment" (attachmentFilename a), LBS.fromStrict (attachmentContent a))
       | a <- envelopeAttachments envelope
       ]
+
+    withExtraHeaders mail =
+      mail { Mime.mailHeaders = Mime.mailHeaders mail ++ extraHeaders }
+
+    extraHeaders =
+      ("Message-ID", envelopeMessageId envelope) : threadHeaderEntries
+
+    threadHeaderEntries = case envelopeThreadHeaders envelope of
+      Nothing   -> []
+      Just hdrs ->
+        maybe [] (\rid -> [("In-Reply-To", unValidatedRfcId rid)]) (headersInReplyTo hdrs)
+          ++ case headersReferences hdrs of
+               []   -> []
+               refs -> [("References", Text.unwords (map unValidatedRfcId refs))]
 
 toMimeAddress :: Address -> Mime.Address
 toMimeAddress addr = Mime.Address (sanitizeDisplayName (addressDisplayName addr)) (unEmailAddress (addressEmail addr))

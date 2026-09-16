@@ -84,6 +84,7 @@ library
     , time
     , stm
     , async
+    , mime-mail
     , uuid
     , attoparsec
     , purebred-email
@@ -133,6 +134,7 @@ test-suite owl-test
   ghc-options:        -threaded -rtsopts "-with-rtsopts=-N"
   main-is:            Spec.hs
   other-modules:
+    Owl.Provider.SMTPSpec
     Owl.TUI.ViewSpec
     Owl.TUI.CoreSpec
     Owl.Domain.AddressSpec
