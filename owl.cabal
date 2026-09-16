@@ -1,0 +1,196 @@
+cabal-version: 3.4
+name:          owl
+version:       0.0.0.0
+synopsis:      A simple, exceptionally well-engineered terminal email client.
+license:       AGPL-3.0-or-later
+license-file:  LICENSE
+build-type:    Simple
+
+common warnings
+  ghc-options:
+    -Wall
+    -Wcompat
+    -Wincomplete-patterns
+    -Wincomplete-uni-patterns
+    -Werror
+
+common lang
+  default-language:    GHC2021
+  default-extensions:
+    LambdaCase
+    DerivingStrategies
+    OverloadedStrings
+
+library
+  import:           warnings, lang
+  hs-source-dirs:   src
+  exposed-modules:
+    Owl.TUI.App
+    Owl.TUI.View
+    Owl.TUI.Core
+    Owl.Prelude
+    Owl.Domain.Id
+    Owl.Domain.Address
+    Owl.Domain.Subject
+    Owl.Domain.MessageError
+    Owl.Domain.Flag
+    Owl.Domain.Body
+    Owl.Domain.Attachment
+    Owl.Domain.MailAddress
+    Owl.Domain.Person
+    Owl.Domain.Identity
+    Owl.Domain.Numeric
+    Owl.Domain.Opaque
+    Owl.Message.Identity
+    Owl.Message.Types
+    Owl.Message.Boundary
+    Owl.Thread
+    Owl.Search.Predicate
+    Owl.Search.Query
+    Owl.Search.Index
+    Owl.Search.Rank
+    Owl.Search.Engine
+    Owl.AddressBook
+    Owl.Event
+    Owl.Index.Delta
+    Owl.Sync.Types
+    Owl.Sync.Reconcile
+    Owl.Sync.State
+    Owl.Sync.Execute
+    Owl.Store.Types
+    Owl.Store.Memory
+    Owl.Store.SQLite
+    Owl.Compose
+    Owl.Rules
+    Owl.Wizard
+    Owl.Config
+    Owl.Config.Toml
+    Owl.Keyring.MacOS
+    Owl.Discovery
+    Owl.OAuthCallback
+    Owl.Onboarding
+    Owl.Application
+    Owl.Application.Apply
+    Owl.Provider.Types
+    Owl.Provider.OAuth.Google
+    Owl.Provider.IMAP
+    Owl.Provider.IMAP.UTF7
+    Owl.Provider.SMTP
+  build-depends:
+      base           >=4.19 && <5
+    , text
+    , bytestring
+    , containers
+    , time
+    , stm
+    , async
+    , uuid
+    , attoparsec
+    , purebred-email
+    , lens
+    , case-insensitive
+    , sqlite-simple
+    , HaskellNet
+    , HaskellNet-SSL
+    , hoauth2
+    , http-conduit
+    , uri-bytestring
+    , mime-mail
+    , tomland
+    , directory
+    , filepath
+    , process
+    , dns
+    , warp
+    , wai
+    , http-types
+    , http-client
+    , http-client-tls
+    , mtl
+    , brick
+    , vty
+    , vty-crossplatform
+    , transformers
+    , http-client
+
+executable owl
+  import:           warnings, lang
+  hs-source-dirs:   app
+  main-is:          Main.hs
+  ghc-options:      -threaded -rtsopts "-with-rtsopts=-N"
+  build-depends:
+      base
+    , containers
+    , text
+    , time
+    , uuid
+    , owl
+
+test-suite owl-test
+  import:             warnings, lang
+  type:               exitcode-stdio-1.0
+  hs-source-dirs:     test
+  ghc-options:        -threaded -rtsopts "-with-rtsopts=-N"
+  main-is:            Spec.hs
+  other-modules:
+    Owl.TUI.ViewSpec
+    Owl.TUI.CoreSpec
+    Owl.Domain.AddressSpec
+    Owl.Domain.SubjectSpec
+    Owl.Domain.AttachmentSpec
+    Owl.Domain.BodySpec
+    Owl.Message.IdentitySpec
+    Owl.Message.BoundarySpec
+    Owl.Message.BoundarySizeLimitSpec
+    Owl.ThreadSpec
+    Owl.Search.PredicateSpec
+    Owl.Search.QuerySpec
+    Owl.Search.EngineSpec
+    Owl.AddressBookSpec
+    Owl.Index.DeltaSpec
+    Owl.Sync.ReconcileSpec
+    Owl.Store.MemorySpec
+    Owl.Store.SQLiteSpec
+    Owl.Application.ApplySpec
+    Owl.ComposeSpec
+    Owl.RulesSpec
+    Owl.WizardSpec
+    Owl.Config.TomlSpec
+    Owl.Keyring.MacOSSpec
+    Owl.DiscoverySpec
+    Owl.OAuthCallbackSpec
+    Owl.Provider.TypesSpec
+    Owl.Provider.IMAPSpec
+    Owl.Provider.IMAP.UTF7Spec
+    Owl.Domain.IdSpec
+    Owl.Domain.MailAddressSpec
+    Owl.Domain.AttachmentSanitizeSpec
+  build-tool-depends: hspec-discover:hspec-discover
+  build-depends:
+      base
+    , owl
+    , text
+    , bytestring
+    , containers
+    , time
+    , uuid
+    , hspec
+    , hedgehog
+    , hspec-hedgehog
+    , sqlite-simple
+    , HaskellNet
+    , directory
+    , filepath
+    , async
+    , http-conduit
+    , process
+
+benchmark owl-bench
+  import:           warnings, lang
+  type:               exitcode-stdio-1.0
+  hs-source-dirs:   bench
+  main-is:          Bench.hs
+  build-depends:
+      base
+    , owl
+    , criterion

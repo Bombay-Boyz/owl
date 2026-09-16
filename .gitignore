@@ -1,0 +1,8 @@
+dist-newstyle/
+*.hi
+*.o
+*.dyn_o
+*.dyn_hi
+*.bak
+.ghc.environment.*
+.DS_Store

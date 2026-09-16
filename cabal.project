@@ -1,0 +1,28 @@
+packages: .
+tests: True
+benchmarks: True
+
+-- GHC 9.14.1 (Dec 2025) ships base-4.22.0.0, which is newer than
+-- several transitive dependencies' declared upper bounds (HaskellNet,
+-- serialise, and likely others in this tree -- the ecosystem simply
+-- hasn't caught up to this specific, recent GHC release yet). Allowing
+-- a newer base than declared is standard, low-risk practice right
+-- after a new GHC release: base itself very rarely breaks backward
+-- compatibility, unlike relaxing bounds on other packages, which is
+-- why this is scoped to exactly base and nothing else.
+allow-newer: *:base
+
+-- Without this, the solver backtracks to HaskellNet-SSL-0.3.4.1, which
+-- genuinely fails to build against the resolved `network` package
+-- (PortNumber's export location moved in a later `network` major
+-- version, after 0.3.4.1 was released). 0.4.0.2 is new enough to not
+-- have this problem.
+constraints: HaskellNet-SSL >= 0.4
+
+-- hoauth2's own changelog notes "relax crypton upper bound to support
+-- crypton-1.1.x" -- something else in the tree (most likely
+-- HaskellNet-SSL's own crypton-connection dependency) was probably
+-- pulling in an older crypton that predates the ByteArrayAccess
+-- instance hoauth2's Pkce module needs against `ram`.
+constraints: crypton >= 1.1
+

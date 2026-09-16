@@ -1,0 +1,4 @@
+# Owl project Fourmolu configuration -- intentionally empty for Phase 0.
+# Fourmolu runs fine on its documented defaults with no file present;
+# this stub exists so real settings can be added once confirmed against
+# `fourmolu --help` on the locally installed version.

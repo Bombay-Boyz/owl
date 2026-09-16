@@ -1,0 +1,161 @@
+module Owl.ComposeSpec (spec) where
+
+import qualified Data.List.NonEmpty as NE
+import qualified Data.Set as Set
+import Data.Text (Text)
+import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
+import qualified Data.UUID as UUID
+import Hedgehog (forAll, (===))
+import qualified Hedgehog.Gen as Gen
+import qualified Hedgehog.Range as Range
+import Test.Hspec
+import Test.Hspec.Hedgehog (hedgehog)
+
+import Owl.Compose hiding (replyTo)
+import qualified Owl.Compose as Compose
+import Owl.Domain.Address (mkEmailAddress)
+import Owl.Domain.Body (Body (..))
+import Owl.Domain.Id (AccountId (..), LocalId (..), MessageId (..), ThreadId (..))
+import Owl.Domain.Identity (Identity (..))
+import Owl.Domain.MailAddress (Address (..), addressEmail)
+import Owl.Domain.Subject (Subject, mkSubject, unSubject)
+import Owl.Message.Boundary (parseMessage)
+import Owl.Message.Identity (MessageIdentity (..), ValidatedRfcId, parseRfcMessageId)
+import Owl.Message.Types (Message (..))
+
+mkAddr :: Text -> Address
+mkAddr t = Address Nothing (either (error . show) id (mkEmailAddress t))
+
+mkMid :: Int -> MessageId
+mkMid n = MessageId (LocalId (UUID.fromWords (fromIntegral n) 0 0 0))
+
+mkSub :: Text -> Subject
+mkSub t = either (error . show) id (mkSubject t)
+
+mustRfc :: Text -> ValidatedRfcId
+mustRfc t = maybe (error "bad fixture rfc") id (parseRfcMessageId ("<" <> t <> "@example.com>"))
+
+testIdentity :: Identity
+testIdentity = Identity
+  { identityAccountId    = AccountId "acct1"
+  , identityEmailAddress = either (error . show) id (mkEmailAddress "alice@example.com")
+  , identityDisplayName  = Just "Alice Smith"
+  , identityIsDefault    = True
+  }
+
+otherAccountIdentity :: Identity
+otherAccountIdentity = testIdentity { identityAccountId = AccountId "acct2" }
+
+originalMsg :: Message
+originalMsg = Message
+  { identity    = MessageIdentity
+      { messageId = mkMid 1
+      , rfcId     = Just (AccountId "acct1", mustRfc "orig")
+      }
+  , accountId   = AccountId "acct1"
+  , threadId    = ThreadId "t1"
+  , sender      = mkAddr "bob@example.net"
+  , recipients  = [mkAddr "alice@example.com", mkAddr "carol@example.org"]
+  , subject     = mkSub "Project update"
+  , sentAt      = UTCTime (fromGregorian 2026 1 1) (secondsToDiffTime 0)
+  , body        = Body (Just "line one\nline two") Nothing
+  , attachments = []
+  , flags       = Set.empty
+  , references  = []
+  , replyTo     = []
+  }
+
+originalWithReplyTo :: Message
+originalWithReplyTo = originalMsg { replyTo = [mkAddr "list@example.org"] }
+
+spec :: Spec
+spec = do
+  describe "normalizeReplySubject" $ do
+    it "adds Re: to a bare subject" $
+      unSubject (normalizeReplySubject (mkSub "Hello")) `shouldBe` "Re: Hello"
+
+    it "does not double up an existing Re:" $
+      unSubject (normalizeReplySubject (mkSub "Re: Hello")) `shouldBe` "Re: Hello"
+
+    it "collapses a doubled Re: Re:" $
+      unSubject (normalizeReplySubject (mkSub "Re: Re: Hello")) `shouldBe` "Re: Hello"
+
+    it "is case-insensitive on the existing prefix" $
+      unSubject (normalizeReplySubject (mkSub "RE: Hello")) `shouldBe` "Re: Hello"
+
+    it "is idempotent for any generated subject text" $ hedgehog $ do
+      text <- forAll (Gen.text (Range.linear 0 40) (Gen.filter (`notElem` ("\r\n" :: String)) Gen.unicode))
+      case mkSubject text of
+        Left _     -> pure ()
+        Right subj ->
+          let once  = normalizeReplySubject subj
+              twice = normalizeReplySubject once
+          in unSubject twice === unSubject once
+
+  describe "threadHeaders" $ do
+    it "carries the original's own rfcId as In-Reply-To and appends it to References" $ do
+      let hdrs = threadHeaders originalMsg
+      (() <$ headersInReplyTo hdrs) `shouldBe` Just ()
+      length (headersReferences hdrs) `shouldBe` 1
+
+    it "is Nothing/empty when the original has no known rfcId" $ do
+      let noRfc = originalMsg { identity = (identity originalMsg) { rfcId = Nothing } }
+          hdrs  = threadHeaders noRfc
+      headersInReplyTo hdrs `shouldBe` Nothing
+      headersReferences hdrs `shouldBe` []
+
+  describe "replyTo" $ do
+    it "ReplyToSender replies only to the sender" $
+      case Compose.replyTo (mkMid 2) ReplyToSender testIdentity originalMsg of
+        Left err    -> expectationFailure (show err)
+        Right draft -> draftRecipients draft `shouldBe` [sender originalMsg]
+
+    it "ReplyToAll includes other recipients but excludes the identity's own address" $
+      case Compose.replyTo (mkMid 2) ReplyToAll testIdentity originalMsg of
+        Left err    -> expectationFailure (show err)
+        Right draft -> draftRecipients draft `shouldBe` [sender originalMsg, mkAddr "carol@example.org"]
+
+    it "prefers Reply-To over the sender when present (also covers mailing-list behavior)" $
+      case Compose.replyTo (mkMid 2) ReplyToSender testIdentity originalWithReplyTo of
+        Left err    -> expectationFailure (show err)
+        Right draft -> draftRecipients draft `shouldBe` [mkAddr "list@example.org"]
+
+    it "normalizes the subject and quotes the body" $
+      case Compose.replyTo (mkMid 2) ReplyToSender testIdentity originalMsg of
+        Left err    -> expectationFailure (show err)
+        Right draft -> do
+          unSubject (draftSubject draft) `shouldBe` "Re: Project update"
+          bodyPlainText (draftBody draft) `shouldBe` Just "> line one\n> line two\n"
+
+    it "rejects an identity from a different account than the message" $
+      Compose.replyTo (mkMid 2) ReplyToSender otherAccountIdentity originalMsg
+        `shouldBe` Left (IdentityAccountMismatch (AccountId "acct2") (AccountId "acct1"))
+
+  describe "quoteBody" $
+    it "QuoteNone empties the body" $
+      quoteBody QuoteNone (Body (Just "hi") Nothing) `shouldBe` Body Nothing Nothing
+
+  describe "toEnvelope" $ do
+    it "rejects a Draft with no recipients" $
+      toEnvelope (newDraft (mkMid 3) testIdentity (mkSub "Hi")) `shouldBe` Left NoRecipients
+
+    it "builds an envelope with the identity's address as From and all recipients as To" $ do
+      let draft = (newDraft (mkMid 3) testIdentity (mkSub "Hi"))
+            { draftRecipients = [mkAddr "bob@example.net", mkAddr "carol@example.org"] }
+      case toEnvelope draft of
+        Left err       -> expectationFailure (show err)
+        Right envelope -> do
+          addressEmail (envelopeSender envelope) `shouldBe` identityEmailAddress testIdentity
+          NE.toList (envelopeRecipients envelope)
+            `shouldBe` [mkAddr "bob@example.net", mkAddr "carol@example.org"]
+
+    it "renders wire bytes that purebred-email's own parser accepts" $ do
+      let draft = (newDraft (mkMid 3) testIdentity (mkSub "Hi there"))
+            { draftRecipients = [mkAddr "bob@example.net"]
+            , draftBody       = Body (Just "hello") Nothing
+            }
+      case toEnvelope draft of
+        Left err       -> expectationFailure (show err)
+        Right envelope -> case parseMessage (envelopePayload envelope) of
+          Left _  -> expectationFailure "rendered payload did not parse"
+          Right _ -> pure ()
