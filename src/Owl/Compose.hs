@@ -9,11 +9,7 @@
 -- Traversal, which only modifies an existing one).
 --
 -- STILL NOT DONE, stated plainly:
---   * No Date header. RFC 5322 requires one, and its absence is a
---     known spam signal. Adding it needs a timestamp, which is an
---     effect -- so it has to be threaded in from the caller the same
---     way MessageId already is (§12/§21), changing toEnvelope's
---     signature. Deliberately a separate change.
+--   * (Date is now set -- see toEnvelope's UTCTime parameter.)
 --   * Attachments are not embedded in the rendered payload (the
 --     multipart-construction API remains unverified). Note the
 --     SMTP path DOES send them, via mime-mail -- so the stored copy
@@ -41,6 +37,7 @@ module Owl.Compose
   , OutgoingEnvelope (..)
   , ComposeError (..)
   , toEnvelope
+  , rfc5322Date
   ) where
 
 import Control.Lens (set)
@@ -56,6 +53,8 @@ import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TE
+import Data.Time (UTCTime, utc, utcToZonedTime)
+import Data.Time.Format (defaultTimeLocale, formatTime)
 import qualified Data.UUID as UUID
 
 import Owl.Domain.Address (EmailAddress, unEmailAddress)
@@ -207,6 +206,13 @@ data OutgoingEnvelope = OutgoingEnvelope
     -- message -- a reply was going out threading-blind. Carried here
     -- so Owl.Provider.SMTP can set In-Reply-To/References on what is
     -- actually transmitted.
+  , envelopeDate          :: !UTCTime
+    -- ^ The instant the message was composed. Carried as an INSTANT,
+    -- not pre-formatted text, and deliberately unlike
+    -- envelopeMessageId: a Message-ID is an identifier where any
+    -- divergence between the two renderers is a real bug, whereas two
+    -- valid RFC 5322 renderings of the same instant are equivalent.
+    -- So each renderer formats this itself.
   , envelopeMessageId     :: !Text
     -- ^ This message's Message-ID, in its full <...> form. Shared
     -- deliberately: see this module's header note on why both
@@ -223,8 +229,12 @@ data ComposeError = NoRecipients
 -- at least one" -- a Draft with no recipients is a real, valid,
 -- incomplete state (§12's rule); an OutgoingEnvelope with none is not,
 -- and this is where that's enforced.
-toEnvelope :: Draft -> Either ComposeError OutgoingEnvelope
-toEnvelope draft = case NE.nonEmpty (draftRecipients draft) of
+-- | The UTCTime is supplied by the caller rather than read here: "now"
+-- is an effect, and this function is pure. Exactly the pattern already
+-- used for MessageId in Owl.Message.Boundary.validateMessage and in
+-- replyTo above.
+toEnvelope :: UTCTime -> Draft -> Either ComposeError OutgoingEnvelope
+toEnvelope now draft = case NE.nonEmpty (draftRecipients draft) of
   Nothing            -> Left NoRecipients
   Just recipientsNE -> Right OutgoingEnvelope
     { envelopeSender        = Address (identityDisplayName (draftIdentity draft)) (identityEmailAddress (draftIdentity draft))
@@ -233,8 +243,9 @@ toEnvelope draft = case NE.nonEmpty (draftRecipients draft) of
     , envelopeBodyPlain     = bodyPlainText (draftBody draft)
     , envelopeAttachments   = draftAttachments draft
     , envelopeThreadHeaders = draftThreadHeaders draft
+    , envelopeDate          = now
     , envelopeMessageId     = outgoingMessageIdText draft
-    , envelopePayload       = renderDraft draft
+    , envelopePayload       = renderDraft now draft
     }
 
 -- | Renders the outgoing wire bytes. Sets Message-ID and, for a reply,
@@ -247,14 +258,18 @@ toEnvelope draft = case NE.nonEmpty (draftRecipients draft) of
 -- into their conversations while giving them nothing to thread a reply
 -- back TO. Every reply to Owl-sent mail would have started an orphan
 -- thread.
-renderDraft :: Draft -> ByteString
-renderDraft draft = LBS.toStrict (MIME.renderMessage populated)
+renderDraft :: UTCTime -> Draft -> ByteString
+renderDraft now draft = LBS.toStrict (MIME.renderMessage populated)
   where
     base = MIME.createTextPlainMessage (fromMaybe Text.empty (bodyPlainText (draftBody draft)))
     fromMailbox = addressToMailbox (Address (identityDisplayName (draftIdentity draft)) (identityEmailAddress (draftIdentity draft)))
     toMailboxes = map addressToMailbox (draftRecipients draft)
     populated =
       applyThreadHeaders (draftThreadHeaders draft)
+        -- UTC always, never the local zone: a +0530 offset narrows the
+        -- sender's location to a ~1,500km band (docs/header-privacy.md
+        -- R3). purebred renders this via its own renderRFC5322Date.
+        . set IMF.headerDate (Just (utcToZonedTime utc now))
         . set IMF.headerMessageID (outgoingMessageID draft)
         . set (IMF.headerFrom MIME.defaultCharsets) [IMF.Single fromMailbox]
         . set (IMF.headerTo MIME.defaultCharsets) (map IMF.Single toMailboxes)
@@ -330,3 +345,18 @@ emailToAddrSpec email =
       domainText              = Text.drop 1 domainPart
       labels                  = fromMaybe ("invalid" :| []) (NE.nonEmpty (Text.splitOn "." domainText))
   in IMF.AddrSpec (TE.encodeUtf8 localPart) (IMF.DomainDotAtom (fmap (CI.mk . TE.encodeUtf8) labels))
+
+
+-- | RFC 5322 date, in UTC. Deliberately the same pattern that
+-- Owl.Message.Boundary.extractSentAt tries FIRST, so Owl can always
+-- parse back a date it wrote itself -- a property worth having and
+-- worth testing.
+--
+-- Used by the mime-mail path (Owl.Provider.SMTP); the purebred path
+-- uses IMF.headerDate, which formats via purebred's own
+-- renderRFC5322Date. The two strings may differ in incidental
+-- whitespace while denoting the same instant, which is fine -- see
+-- envelopeDate's note on why this differs from Message-ID.
+rfc5322Date :: UTCTime -> Text
+rfc5322Date =
+  Text.pack . formatTime defaultTimeLocale "%a, %d %b %Y %H:%M:%S %z" . utcToZonedTime utc

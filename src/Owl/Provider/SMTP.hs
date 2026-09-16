@@ -46,7 +46,7 @@ import Owl.Domain.Attachment (Attachment (..))
 import Owl.Domain.MailAddress (Address (..), sanitizeDisplayName)
 import Owl.Domain.Subject (unSubject)
 import Owl.Message.Identity (unValidatedRfcId)
-import Owl.Compose (Headers (..))
+import Owl.Compose (Headers (..), rfc5322Date)
 import Owl.Provider.Types
 
 sendMessage :: ProviderSession -> OutgoingEnvelope -> IO (Either ProviderError SendOutcome)
@@ -99,7 +99,9 @@ buildMail envelope =
       mail { Mime.mailHeaders = Mime.mailHeaders mail ++ extraHeaders }
 
     extraHeaders =
-      ("Message-ID", envelopeMessageId envelope) : threadHeaderEntries
+      ("Date", rfc5322Date (envelopeDate envelope))
+        : ("Message-ID", envelopeMessageId envelope)
+        : threadHeaderEntries
 
     threadHeaderEntries = case envelopeThreadHeaders envelope of
       Nothing   -> []

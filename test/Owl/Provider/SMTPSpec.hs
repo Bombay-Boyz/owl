@@ -27,6 +27,9 @@ import Owl.Provider.SMTP (buildMail)
 import qualified Data.Set as Set
 import Data.Time (UTCTime (..), fromGregorian, secondsToDiffTime)
 
+testNow :: UTCTime
+testNow = UTCTime (fromGregorian 2026 1 15) (secondsToDiffTime (14 * 3600 + 30 * 60 + 5))
+
 mkAddr :: Text -> Address
 mkAddr t = Address Nothing (either (error . show) id (mkEmailAddress t))
 
@@ -70,7 +73,7 @@ freshDraft = (newDraft (mkMid 3) testIdentity (mkSub "Hi there"))
   }
 
 headersOf :: Draft -> Either String Mime.Headers
-headersOf draft = case toEnvelope draft of
+headersOf draft = case toEnvelope testNow draft of
   Left err  -> Left (show err)
   Right env -> Right (Mime.mailHeaders (buildMail env))
 
@@ -85,6 +88,7 @@ lookupHeader name hdrs =
       "In-Reply-To" -> "In-Reply-To"
       "References"  -> "References"
       "Subject"     -> "Subject"
+      "Date"        -> "Date"
       _             -> "unknown"
 
 spec :: Spec
@@ -96,7 +100,7 @@ spec = describe "Owl.Provider.SMTP.buildMail -- transmitted headers" $ do
         `shouldBe` Just "<00000003-0000-0000-0000-000000000000@example.com>"
 
   it "uses the SAME Message-ID as the stored copy -- they must not diverge" $
-    case toEnvelope freshDraft of
+    case toEnvelope testNow freshDraft of
       Left err  -> expectationFailure (show err)
       Right env ->
         lookupHeader "Message-ID" (Mime.mailHeaders (buildMail env))
@@ -120,6 +124,11 @@ spec = describe "Owl.Provider.SMTP.buildMail -- transmitted headers" $ do
       Right draft -> case headersOf draft of
         Left err   -> expectationFailure err
         Right hdrs -> lookupHeader "References" hdrs `shouldBe` Just "<orig@example.com>"
+
+  it "sets a Date on the transmitted copy" $
+    case headersOf freshDraft of
+      Left err   -> expectationFailure err
+      Right hdrs -> lookupHeader "Date" hdrs `shouldSatisfy` (/= Nothing)
 
   it "sets no In-Reply-To for a fresh compose" $
     case headersOf freshDraft of

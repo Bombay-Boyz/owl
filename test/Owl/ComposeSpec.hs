@@ -20,9 +20,20 @@ import Owl.Domain.Id (AccountId (..), LocalId (..), MessageId (..), ThreadId (..
 import Owl.Domain.Identity (Identity (..))
 import Owl.Domain.MailAddress (Address (..), addressEmail)
 import Owl.Domain.Subject (Subject, mkSubject, unSubject)
-import Owl.Message.Boundary (parseMessage)
+import Owl.Domain.Attachment (AttachmentLimits (..))
+import Owl.Message.Boundary (decodeCharset, parseMessage, toMessage, validateMessage)
 import Owl.Message.Identity (MessageIdentity (..), ValidatedRfcId, parseRfcMessageId)
 import Owl.Message.Types (Message (..))
+
+-- A fixed instant, so rendered bytes are deterministic across runs.
+testLimits :: AttachmentLimits
+testLimits = AttachmentLimits
+  { maxAttachmentCount     = 10
+  , maxAttachmentTotalSize = 10 * 1024 * 1024
+  }
+
+testNow :: UTCTime
+testNow = UTCTime (fromGregorian 2026 1 15) (secondsToDiffTime (14 * 3600 + 30 * 60 + 5))
 
 mkAddr :: Text -> Address
 mkAddr t = Address Nothing (either (error . show) id (mkEmailAddress t))
@@ -138,12 +149,12 @@ spec = do
 
   describe "toEnvelope" $ do
     it "rejects a Draft with no recipients" $
-      toEnvelope (newDraft (mkMid 3) testIdentity (mkSub "Hi")) `shouldBe` Left NoRecipients
+      toEnvelope testNow (newDraft (mkMid 3) testIdentity (mkSub "Hi")) `shouldBe` Left NoRecipients
 
     it "builds an envelope with the identity's address as From and all recipients as To" $ do
       let draft = (newDraft (mkMid 3) testIdentity (mkSub "Hi"))
             { draftRecipients = [mkAddr "bob@example.net", mkAddr "carol@example.org"] }
-      case toEnvelope draft of
+      case toEnvelope testNow draft of
         Left err       -> expectationFailure (show err)
         Right envelope -> do
           addressEmail (envelopeSender envelope) `shouldBe` identityEmailAddress testIdentity
@@ -155,7 +166,7 @@ spec = do
             { draftRecipients = [mkAddr "bob@example.net"]
             , draftBody       = Body (Just "hello") Nothing
             }
-      case toEnvelope draft of
+      case toEnvelope testNow draft of
         Left err       -> expectationFailure (show err)
         Right envelope -> case parseMessage (envelopePayload envelope) of
           Left _  -> expectationFailure "rendered payload did not parse"
@@ -172,7 +183,7 @@ spec = do
           , draftBody       = Body (Just "hello") Nothing
           }
 
-        payloadOf draft = case toEnvelope draft of
+        payloadOf draft = case toEnvelope testNow draft of
           Left err       -> Left (show err)
           Right envelope -> Right (envelopePayload envelope)
 
@@ -227,8 +238,23 @@ spec = do
         Left err      -> expectationFailure err
         Right payload -> ("In-Reply-To" `BC.isInfixOf` payload) `shouldBe` False
 
-    it "KNOWN GAP: no Date header yet -- this test documents the gap and \
-       \must be inverted when Date is added" $
-      case payloadOf simpleDraft of
-        Left err      -> expectationFailure err
-        Right payload -> ("Date:" `BC.isInfixOf` payload) `shouldBe` False
+    it "emits a Date header" $
+      shouldContainBytes "Date header" "Date:" simpleDraft
+
+    -- The gap this replaces asserted Date was ABSENT, deliberately, so
+    -- the documentation could not rot silently. Its failure was the
+    -- signal to write this.
+    it "emits a Date in UTC, never the local zone (docs/header-privacy.md R3)" $
+      shouldContainBytes "UTC offset" "+0000" simpleDraft
+
+    it "can parse back a date it wrote itself -- round-trips through our own parser" $
+      case toEnvelope testNow simpleDraft of
+        Left err  -> expectationFailure (show err)
+        Right env -> case parseMessage (envelopePayload env) of
+          Left _    -> expectationFailure "own rendered payload did not parse"
+          Right raw -> case decodeCharset raw of
+            Left _    -> expectationFailure "own rendered payload did not decode"
+            Right dec ->
+              case validateMessage (AccountId "acct1") (mkMid 9) testLimits dec of
+                Left err  -> expectationFailure ("own message failed validation: " ++ show err)
+                Right vm  -> sentAt (toMessage vm) `shouldBe` testNow
