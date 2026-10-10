@@ -26,3 +26,6 @@ constraints: HaskellNet-SSL >= 0.4
 -- instance hoauth2's Pkce module needs against `ram`.
 constraints: crypton >= 1.1
 
+packages: .
+constraints: hoauth2 >= 2.15.0
+
